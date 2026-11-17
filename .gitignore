@@ -1,0 +1,10 @@
+# Godot-generated cache and local build output
+**/.godot/
+**/build/
+**/exported/
+
+# Temporary editor and operating-system files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
