@@ -1,0 +1,20 @@
+Godot 4.7 ellipse parser fix
+============================
+- Fixed scripts/World.gd: the old custom draw_ellipse(Vector2, Vector2, Color)
+  had the same name as the new CanvasItem.draw_ellipse built-in, so Godot rejected
+  its function signature.
+- Replaced the two calls with the Godot 4.7 built-in signature:
+  draw_ellipse(center: Vector2, major: float, minor: float, color: Color).
+- Removed the conflicting function declaration.
+- Retained the previously patched scripts/Main.gd and Godot 4.7 project settings.
+- Unchanged PNG sprites, audio, and original HTML reference.
+- Actual Godot runtime parsing is NOT verified on this system.
+
+HOW TO USE
+1. Extract the ZIP to a NEW folder. Do not mix old scripts with the new ones.
+2. Import project.godot in Godot 4.7, then run with F5.
+3. If you already have the old project open, an alternative is to replace ONLY
+   scripts/World.gd with the standalone file distributed alongside the ZIP.
+
+Note: This remains an unfinished Godot fidelity-port work in progress, not an
+exact, validated conversion of the entire browser game.

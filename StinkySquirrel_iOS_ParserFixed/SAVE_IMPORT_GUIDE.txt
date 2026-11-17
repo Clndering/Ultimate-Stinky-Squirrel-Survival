@@ -1,0 +1,18 @@
+STINKY SQUIRREL — GET YOUR HTML PROGRESS JSON
+
+1. Open the ORIGINAL HTML game using the same browser and same file location you normally play it from.
+2. Press F12, choose Console, paste the code below, press Enter.
+3. Your browser will download stinky_squirrel_browser_save.json to Downloads.
+4. Open Godot game > IMPORT HTML PROGRESS and choose that JSON.
+
+(() => {
+ const saved = localStorage.getItem('stinky-squirrel-nightwatch-v2');
+ if (!saved) { alert('No saved progress found in this browser/origin'); return; }
+ const link = document.createElement('a');
+ const url = URL.createObjectURL(new Blob([saved],{type:'application/json'}));
+ link.href=url; link.download='stinky_squirrel_browser_save.json'; link.click();
+ setTimeout(()=>URL.revokeObjectURL(url),60000);
+})();
+
+NOTE: This is NOT pre-packaged in the Godot ZIP: your browser stores it locally.
+If your browser Console blocks pasted code, follow its own instructions to allow pasting.
