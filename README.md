@@ -68,4 +68,9 @@ This is an active project. The Godot ports document areas where parity, multipla
 
 ## License
 
-No reuse license has been selected for this project. Contact the owner before reusing the game, code, or artwork.
+## License
+
+* **Source Code:** Licensed under the [MIT License](LICENSE).
+* **Art, Audio, & Assets:** Licensed under [Creative Commons Attribution 4.0 (CC BY 4.0)](https://creativecommons.org).
+
+You are free to use, modify, and distribute this game and its assets for any purpose, provided you include the original copyright notice and credit.
