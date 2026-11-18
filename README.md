@@ -68,8 +68,6 @@ This is an active project. The Godot ports document areas where parity, multipla
 
 ## License
 
-## License
-
 * **Source Code:** Licensed under the [MIT License](LICENSE).
 * **Art, Audio, & Assets:** Licensed under [Creative Commons Attribution 4.0 (CC BY 4.0)](https://creativecommons.org).
 
