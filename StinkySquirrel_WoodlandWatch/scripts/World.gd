@@ -18,7 +18,11 @@ var ground_mesh: ArrayMesh
 var ground_anchor := Vector2i.ZERO
 var ground_cache: Dictionary = {}
 var ground_marks := PackedVector2Array()
-var wet_marks := PackedVector2Array()
+const GROUND_KEYS := ["grass_0", "grass_1", "grass_2", "grass_3", "mud", "stone"]
+var tile_offsets: Array[Vector2i] = []
+var tile_centers := PackedVector2Array()
+var tile_uvs: Array[Vector4] = []
+var ground_geometry: Array = []
 var terrain_regions: Dictionary = {}
 var gun_art: Dictionary = {}
 var upgrade_icons: Dictionary = {}
@@ -37,18 +41,24 @@ func _ready() -> void:
                 gun_glow_art["%s_%d" % [weapon_id,i]] = load("res://ui/guns/glows/%s_%d.png" % [weapon_id,i])
 
 func _build_terrain_atlas() -> void:
-    var keys := ["grass_0", "grass_1", "grass_2", "grass_3", "mud", "stone"]
     var atlas := Image.create_empty(768, 128, false, Image.FORMAT_RGBA8)
-    for i in range(keys.size()):
-        var tile: Image = art[keys[i]].get_image()
+    for i in range(GROUND_KEYS.size()):
+        var tile: Image = art[GROUND_KEYS[i]].get_image()
         if tile == null or tile.get_width() > 126 or tile.get_height() > 126:
             return
         tile.convert(Image.FORMAT_RGBA8)
         var offset := Vector2i(i * 128 + 1, 1)
         var bounds := Rect2i(Vector2i.ZERO, tile.get_size())
         atlas.blit_rect(tile, bounds, offset)
-        terrain_regions[keys[i]] = Rect2(Vector2(offset), Vector2(tile.get_size()))
+        terrain_regions[GROUND_KEYS[i]] = Rect2(Vector2(offset), Vector2(tile.get_size()))
     terrain_atlas = ImageTexture.create_from_image(atlas)
+    var atlas_size := terrain_atlas.get_size()
+    for key in GROUND_KEYS:
+        var region: Rect2 = terrain_regions[key]
+        var top := region.position / atlas_size
+        var bottom := region.end / atlas_size
+        tile_uvs.append(Vector4(top.x, top.y, bottom.x, bottom.y))
+    _prepare_ground_geometry()
 
 func delta_toroid(d: float) -> float:
     return fposmod(d + MAP * 0.5, MAP) - MAP * 0.5
@@ -68,8 +78,6 @@ func sprite_region(key: String, src: Rect2, dst: Rect2, alpha: float = 1.0, tint
         draw_texture_rect_region(art[key], dst, src, Color(tint, alpha))
 
 func shadow(p: Vector2, radius: Vector2, opacity: float = 0.32) -> void:
-    if not bool(game.settings.get("fx_contact_shadows", true)):
-        return
     draw_set_transform(p, 0.0, Vector2(1.0, max(0.1, radius.y / radius.x)))
     draw_circle(Vector2.ZERO, radius.x, Color(0.02, 0.08, 0.07, opacity))
     draw_set_transform(Vector2.ZERO)
@@ -87,14 +95,17 @@ func hash_tile(x: int, y: int) -> int:
     return ((x * 73856093) ^ (y * 19349663) ^ 92821) & 0x7fffffff
 
 func ground_kind(x: int, y: int) -> String:
-    var h := hash_tile(x, y)
-    if Vector2(float(x), float(y)).distance_to(Vector2(27,27)) < 8.0:
-        return "grass_%d" % (h % 4)
-    if h % 17 == 3:
-        return "mud"
-    if h % 23 == 9:
-        return "stone"
-    return "grass_%d" % (h % 4)
+    return GROUND_KEYS[_ground_tile(x, y, hash_tile(x, y))]
+
+func _ground_tile(x: int, y: int, hash_value: int) -> int:
+    var dx := x - 27
+    var dy := y - 27
+    if dx * dx + dy * dy >= 64:
+        if hash_value % 17 == 3:
+            return 4
+        if hash_value % 23 == 9:
+            return 5
+    return hash_value % 4
 
 func _draw_ground(focus: Vector2) -> void:
     var anchor := Vector2i(floori(focus.x / 4.0) * 4, floori(focus.y / 4.0) * 4)
@@ -107,36 +118,21 @@ func _draw_ground(focus: Vector2) -> void:
             ground_anchor = anchor
             ground_mesh = cached[0]
             ground_marks = cached[1]
-            wet_marks = cached[2]
         else:
             _rebuild_ground(anchor)
             if ground_cache.size() >= 8:
                 ground_cache.erase(ground_cache.keys()[0])
-            ground_cache[anchor] = [ground_mesh, ground_marks, wet_marks]
+            ground_cache[anchor] = [ground_mesh, ground_marks]
     var shift := -iso(focus - Vector2(anchor))
     if ground_mesh.get_surface_count() > 0:
         draw_mesh(ground_mesh, terrain_atlas, Transform2D(0.0, shift))
     for mark in ground_marks:
         draw_rect(Rect2(mark + shift + Vector2(8, -6), Vector2(3, 3)), Color("#5f7e57"))
-    if bool(game.settings.get("fx_reflections", false)) and game.weather in ["rain", "mist"]:
-        for mark in wet_marks:
-            var p := mark + shift
-            _draw_pixel_ellipse(p + Vector2(0, 4), 21.0, 6.5, Color(.34, .64, .70, .19))
-            draw_line(p + Vector2(-11, 1), p + Vector2(10, 1), Color(.73, .94, .94, .21), 1.0)
 
-func _rebuild_ground(anchor: Vector2i) -> void:
-    ground_anchor = anchor
-    ground_marks.clear()
-    wet_marks.clear()
+func _prepare_ground_geometry() -> void:
     var vertices := PackedVector2Array()
-    var uvs := PackedVector2Array()
     var indices := PackedInt32Array()
-    vertices.resize(10000)
-    uvs.resize(10000)
-    indices.resize(15000)
-    var written := 0
     var bound := Rect2(-196, -174, 1672, 1068)
-    var atlas_size := terrain_atlas.get_size()
     for diagonal in range(-36, 37):
         var first := floori(float(diagonal - 29) * .5)
         var last := ceili(float(diagonal + 29) * .5)
@@ -145,44 +141,42 @@ func _rebuild_ground(anchor: Vector2i) -> void:
             var center := C + iso(Vector2(x, y))
             if not bound.has_point(center):
                 continue
-            var wx := posmod(anchor.x + x, int(MAP))
-            var wy := posmod(anchor.y + y, int(MAP))
-            var source: Rect2 = terrain_regions[ground_kind(wx, wy)]
-            var uv_a := source.position / atlas_size
-            var uv_b := source.end / atlas_size
+            tile_offsets.append(Vector2i(x, y))
+            tile_centers.append(center)
             var top := center + Vector2(-32, -16)
-            var index := written * 4
-            vertices[index] = top
-            vertices[index + 1] = top + Vector2(64, 0)
-            vertices[index + 2] = top + Vector2(64, 40)
-            vertices[index + 3] = top + Vector2(0, 40)
-            uvs[index] = uv_a
-            uvs[index + 1] = Vector2(uv_b.x, uv_a.y)
-            uvs[index + 2] = uv_b
-            uvs[index + 3] = Vector2(uv_a.x, uv_b.y)
-            var slot := written * 6
-            indices[slot] = index
-            indices[slot + 1] = index + 1
-            indices[slot + 2] = index + 2
-            indices[slot + 3] = index
-            indices[slot + 4] = index + 2
-            indices[slot + 5] = index + 3
-            written += 1
-            var tile_hash := hash_tile(wx, wy)
-            if tile_hash % 37 == 0:
-                ground_marks.append(center)
-            if tile_hash % 139 == 3:
-                wet_marks.append(center)
-    vertices.resize(written * 4)
-    uvs.resize(written * 4)
-    indices.resize(written * 6)
-    var arrays := []
-    arrays.resize(Mesh.ARRAY_MAX)
-    arrays[Mesh.ARRAY_VERTEX] = vertices
-    arrays[Mesh.ARRAY_TEX_UV] = uvs
-    arrays[Mesh.ARRAY_INDEX] = indices
+            var index := vertices.size()
+            vertices.append(top)
+            vertices.append(top + Vector2(64, 0))
+            vertices.append(top + Vector2(64, 40))
+            vertices.append(top + Vector2(0, 40))
+            indices.append_array(PackedInt32Array([index, index + 1, index + 2, index, index + 2, index + 3]))
+    ground_geometry.resize(Mesh.ARRAY_MAX)
+    ground_geometry[Mesh.ARRAY_VERTEX] = vertices
+    ground_geometry[Mesh.ARRAY_INDEX] = indices
+
+func _rebuild_ground(anchor: Vector2i) -> void:
+    ground_anchor = anchor
+    ground_marks.clear()
+    var uvs := PackedVector2Array()
+    uvs.resize(tile_offsets.size() * 4)
+    for tile in range(tile_offsets.size()):
+        var offset := tile_offsets[tile]
+        var x := posmod(anchor.x + offset.x, int(MAP))
+        var y := posmod(anchor.y + offset.y, int(MAP))
+        var tile_hash := hash_tile(x, y)
+        var region := tile_uvs[_ground_tile(x, y, tile_hash)]
+        var top := Vector2(region.x, region.y)
+        var bottom := Vector2(region.z, region.w)
+        var index := tile * 4
+        uvs[index] = top
+        uvs[index + 1] = Vector2(bottom.x, top.y)
+        uvs[index + 2] = bottom
+        uvs[index + 3] = Vector2(top.x, bottom.y)
+        if tile_hash % 37 == 0:
+            ground_marks.append(tile_centers[tile])
+    ground_geometry[Mesh.ARRAY_TEX_UV] = uvs
     ground_mesh = ArrayMesh.new()
-    ground_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, Mesh.ARRAY_FLAG_USE_2D_VERTICES)
+    ground_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, ground_geometry, [], {}, Mesh.ARRAY_FLAG_USE_2D_VERTICES)
 
 func _draw_ground_fallback(focus: Vector2) -> void:
     # Draw only the projected diamonds actually visible. Cached textures are GPU-native.
@@ -206,10 +200,6 @@ func _draw_ground_fallback(focus: Vector2) -> void:
                 draw_texture_rect_region(terrain_atlas, rect, terrain_regions[tile])
             else:
                 texture_rect(tile, rect)
-            # Reflective wet ground is rendered only when enabled, with strict culling.
-            if bool(game.settings.get("fx_reflections",false)) and game.weather in ["rain","mist"] and hash_tile(wx,wy)%139 == 3:
-                _draw_pixel_ellipse(p + Vector2(0.0,4.0), 21.0, 6.5, Color(0.34,0.64,0.70,0.19))
-                draw_line(p + Vector2(-11.0,1.0),p + Vector2(10.0,1.0),Color(0.73,0.94,0.94,0.21),1.0)
             if hash_tile(wx, wy) % 37 == 0:
                 draw_rect(Rect2(p.x + 8, p.y - 6, 3, 3), Color("5f7e57"))
 
@@ -244,7 +234,8 @@ func _draw() -> void:
         drawables.append({"y":p.y, "kind":o.kind, "p":p, "source":o})
     for a in game.drops:
         var p := screen_point(a.pos, focus)
-        drawables.append({"y":p.y-1, "kind":"acorn", "p":p, "source":a})
+        if Rect2(-28, -30, 1336, 780).has_point(p):
+            drawables.append({"y":p.y-1, "kind":"acorn", "p":p, "source":a})
     for shard in game.xp_drops:
         var p := screen_point(shard.pos,focus)
         if p.x > -40 and p.x < 1320 and p.y > -40 and p.y < 760:
@@ -259,9 +250,27 @@ func _draw() -> void:
         drawables.append({"y":p.y, "kind":"stink_blob", "p":p, "source":blob})
     for hz in game.hazards:
         var p := screen_point(hz.pos, focus)
-        drawables.append({"y":p.y-2, "kind":"hazard", "p":p, "source":hz})
+        if Rect2(0, 0, 1280, 720).grow(float(hz.radius) + 12.0).has_point(p):
+            drawables.append({"y":p.y-2, "kind":"hazard", "p":p, "source":hz})
+    var locator_needed := true
+    var locator_positions := PackedVector2Array()
+    var locator_distances := PackedFloat32Array()
     for e in game.enemies:
         var p := screen_point(game.render_enemy_position(e), focus)
+        if locator_needed and e.hp > 0:
+            var distance := p.distance_squared_to(C)
+            if distance <= 625.0 * 625.0:
+                locator_needed = false
+            else:
+                var index := 0
+                while index < locator_distances.size() and locator_distances[index] <= distance:
+                    index += 1
+                if index < 3:
+                    locator_distances.insert(index, distance)
+                    locator_positions.insert(index, p)
+                    if locator_positions.size() > 3:
+                        locator_distances.resize(3)
+                        locator_positions.resize(3)
         if p.x < -160 or p.x > 1440 or p.y < -150 or p.y > 850:
             continue
         drawables.append({"y":p.y + 0.05, "kind":"enemy", "p":p, "source":e})
@@ -315,10 +324,6 @@ func _draw() -> void:
     for trace in game.traces:
         var offset := screen_point(trace.get("focus", focus), focus) - C
         draw_line(trace.start + offset, trace.end + offset, trace.tint, max(1.0,trace.width))
-        if bool(game.settings.get("fx_long_exposure",false)):
-            var afterglow: Color = trace.tint
-            afterglow.a *= 0.16 * float(game.settings.get("fx_long_exposure_strength",0.32))
-            draw_line(trace.start + offset, trace.end + offset, afterglow, max(2.0,trace.width*5.0))
     for particle in game.particles:
         var fade: float = clampf(1.0 - particle.age / max(particle.life,.01),0,1)
         var color: Color = particle.tint
@@ -328,18 +333,10 @@ func _draw() -> void:
         if Rect2(-12, -12, 1304, 744).has_point(point):
             draw_rect(Rect2(point, Vector2(particle.size,particle.size)), color)
     _draw_operation_waypoint(focus)
-    # Locator arrows: three nearest offscreen squirrels, with toroidal distance.
-    var candidates: Array[Dictionary] = []
-    for e in game.enemies:
-        if e.hp<=0:continue
-        var vp := screen_point(game.render_enemy_position(e), focus)
-        var dst := vp.distance_to(C)
-        candidates.append({"screen":vp,"distance":dst})
-    candidates.sort_custom(func(a:Dictionary,b:Dictionary)->bool:return a.distance<b.distance)
-    if candidates.size()>0 and candidates[0].distance>625:
+    if locator_needed:
         var colors := [Color("ffcf6d"),Color("78e0ec"),Color("e8a6fa")]
-        for i in range(mini(3,candidates.size())):
-            var d:Vector2=candidates[i].screen-C
+        for i in range(locator_positions.size()):
+            var d := locator_positions[i] - C
             var u:Vector2=d.normalized()
             var v:Vector2=Vector2(-u.y,u.x)
             var margin := (i-1)*40.0
@@ -351,30 +348,28 @@ func _draw() -> void:
     draw_rect(Rect2(0, 0, 1280, 720), Color(.95, .43, .16, dusk * .11))
     var night: float = (1.0 - sin(day * TAU - PI * 0.5)) * 0.5
     draw_rect(Rect2(0,0,1280,720), Color(0.04,0.1,0.26,night * 0.21))
-    if bool(game.settings.get("weather",true)):
-        var ticks: int = int(game.elapsed * 100.0)
-        var detail := .60 if game.settings.get("graphics") == "Performance" else 1.0
-        if game.weather == "clear":
-            for i in range(int(21.0 * detail)):
-                var dust := Vector2((i * 171 + ticks / 5) % 1280, (i * 313 + ticks / 12) % 720)
-                draw_rect(Rect2(dust, Vector2(2, 2)), Color(.93, .96, .54, .18 + .13 * sin(float(ticks + i * 17) * .036)))
-        if game.weather == "rain":
-            for i in range(int(94.0 * detail)):
-                var rx: float = float((i * 131 + ticks * 3) % 1280)
-                var ry: float = float((i * 277 + ticks * 7) % 720)
-                draw_line(Vector2(rx,ry), Vector2(rx-6,ry+15), Color(0.67,0.83,0.94,0.30),1.0)
-        elif game.weather == "snow":
-            for i in range(int(53.0 * detail)):
-                var sx: float = float((i * 157 + ticks / 6) % 1280)
-                var sy: float = float((i * 229 + ticks / 3) % 720)
-                draw_circle(Vector2(sx,sy),1.2,Color(0.86,0.95,1.0,0.54))
-        elif game.weather == "wind":
-            for i in range(int(32.0 * detail)):
-                var wx: float = float((i * 167 + ticks * 2) % 1280)
-                var wy: float = float((i * 237 + ticks / 2) % 720)
-                draw_line(Vector2(wx,wy),Vector2(wx+25,wy-7),Color(0.77,0.93,0.82,0.13),1.0)
-        elif game.weather == "mist" and not bool(game.settings.get("fx_fog",false)):
-            draw_rect(Rect2(0,0,1280,720),Color(0.55,0.71,0.67,0.055))
+    var ticks: int = int(game.elapsed * 100.0)
+    if game.weather == "clear":
+        for i in range(13):
+            var dust := Vector2((i * 171 + ticks / 5) % 1280, (i * 313 + ticks / 12) % 720)
+            draw_rect(Rect2(dust, Vector2(2, 2)), Color(.93, .96, .54, .18 + .13 * sin(float(ticks + i * 17) * .036)))
+    if game.weather == "rain":
+        for i in range(56):
+            var rx: float = float((i * 131 + ticks * 3) % 1280)
+            var ry: float = float((i * 277 + ticks * 7) % 720)
+            draw_line(Vector2(rx,ry), Vector2(rx-6,ry+15), Color(0.67,0.83,0.94,0.30),1.0)
+    elif game.weather == "snow":
+        for i in range(32):
+            var sx: float = float((i * 157 + ticks / 6) % 1280)
+            var sy: float = float((i * 229 + ticks / 3) % 720)
+            draw_circle(Vector2(sx,sy),1.2,Color(0.86,0.95,1.0,0.54))
+    elif game.weather == "wind":
+        for i in range(20):
+            var wx: float = float((i * 167 + ticks * 2) % 1280)
+            var wy: float = float((i * 237 + ticks / 2) % 720)
+            draw_line(Vector2(wx,wy),Vector2(wx+25,wy-7),Color(0.77,0.93,0.82,0.13),1.0)
+    elif game.weather == "mist":
+        draw_rect(Rect2(0,0,1280,720),Color(0.55,0.71,0.67,0.055))
 
 
 func _draw_chest(point: Vector2, rarity: int, active: bool) -> void:

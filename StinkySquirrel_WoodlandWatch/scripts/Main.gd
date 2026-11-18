@@ -271,33 +271,8 @@ var novelty_timer: float = 0.0
 var boss_name: String = ""
 var upgrades_taken: Array[Dictionary] = []
 var progress: Dictionary = {}
-# All optional GPU post-process effects default OFF to preserve native frame rate.
-# Lighting and visual quality can be customized independently in Settings > Graphics.
-const GRAPHICS_EFFECTS := [
-    {"id":"fx_god_rays","name":"God Rays / Sun Shafts","desc":"GPU sunlight scattering sampled toward the visible sun.","group":"LIGHT & ATMOSPHERE","cost":"MEDIUM"},
-    {"id":"fx_bloom","name":"Bloom / Glow","desc":"GPU highlight bleed around luminous pixels.","group":"LIGHT & ATMOSPHERE","cost":"MEDIUM"},
-    {"id":"fx_fog","name":"Atmospheric Fog","desc":"Layered depth-cue fog; actual 3D volumetric fog requires a 3D scene.","group":"LIGHT & ATMOSPHERE","cost":"LOW"},
-    {"id":"fx_ssao","name":"Ambient Occlusion","desc":"GPU screen-edge darkening, not 3D depth-buffer SSAO.","group":"LIGHT & ATMOSPHERE","cost":"MEDIUM"},
-    {"id":"fx_contact_shadows","name":"Contact Shadows","desc":"Native shadows underneath characters, squirrels, and scenery.","group":"LIGHT & ATMOSPHERE","cost":"LOW"},
-    {"id":"fx_color_grade","name":"Color Grading","desc":"Warm daylight, cold nights, and tonal color correction.","group":"COLOR & FINISH","cost":"LOW"},
-    {"id":"fx_vignette","name":"Vignette","desc":"Gently darkens screen edges.","group":"COLOR & FINISH","cost":"LOW"},
-    {"id":"fx_tonemap","name":"Tone Mapping","desc":"Filmic contrast mapping of the rendered 2D image.","group":"COLOR & FINISH","cost":"LOW"},
-    {"id":"fx_chromatic","name":"Chromatic Aberration","desc":"Subtle RGB separation around edges.","group":"LENS & MOTION","cost":"LOW"},
-    {"id":"fx_outlines","name":"Stylized Outlines","desc":"GPU contrast-edge ink around sprites and terrain.","group":"STYLE & SURFACES","cost":"MEDIUM"},
-    {"id":"fx_reflections","name":"Wet-Surface Reflections","desc":"Native wet-ground glints; full SSR requires 3D depth/normal buffers.","group":"STYLE & SURFACES","cost":"LOW"},
-    {"id":"fx_lens_flare","name":"Lens Flare","desc":"GPU ghosts and streaks around bright daylight.","group":"LENS & MOTION","cost":"LOW"},
-    {"id":"fx_grain","name":"Film Grain / Noise","desc":"Low-amplitude animated film texture.","group":"COLOR & FINISH","cost":"LOW"},
-    {"id":"fx_long_exposure","name":"Long Exposure Trails","desc":"Enhanced projectile streaks that fade naturally.","group":"LENS & MOTION","cost":"LOW"}
-]
-const FX_STRENGTH_DEFAULT := 0.32
-var settings: Dictionary = {"fps":true,"weather":true,"music":true,"novelty":false,"graphics":"Original Pixels", "fx_aa":"Off", "fx_aniso":false}
-var graphics_tab: String = "general"
+var settings: Dictionary = {"fps":true,"music":true,"novelty":false,"veteran":false}
 var settings_return_page: String = "title"
-var fx_layer: CanvasLayer
-var fx_rect: ColorRect
-var fx_material: ShaderMaterial
-var fx_time: float = 0.0
-var last_camera_pos: Vector2 = Vector2(27,27)
 var hud_left_box: PanelContainer
 var hud_right_box: PanelContainer
 var hud_upgrade_box: PanelContainer
@@ -310,7 +285,6 @@ var save_dirty: bool = false
 var save_seconds: float = 0.0
 var hud_fps_seconds: float = 0.0
 var main_scroll: ScrollContainer
-var settings_scroll: ScrollContainer
 var enemy_level_scale := 1.0
 var prestige_confirm: ConfirmationDialog
 var encyclopedia_tab := "enemies"
@@ -354,8 +328,6 @@ func _ready() -> void:
     rng.randomize()
     upgrade_catalog = _upgrade_catalog()
     var mobile_web := OS.has_feature("web") and MobileTouch.wants_mobile_layout()
-    if mobile_web:
-        settings["graphics"] = "Performance"
     _load_progress()
     _retain_legacy_licenses()
     _normalize_loadout_profile()
@@ -381,7 +353,6 @@ func _ready() -> void:
     world = preload("res://scripts/World.gd").new()
     world.game = self
     add_child(world)
-    _make_gpu_fx()
     _make_ui()
     _make_touch_controls()
     _make_quit_dialog()
@@ -469,10 +440,6 @@ func _notification(what: int) -> void:
         _flush_progress()
 
 func _load_progress() -> void:
-    for effect in GRAPHICS_EFFECTS:
-        var key: String = str(effect.id)
-        settings[key] = key == "fx_contact_shadows"
-        settings[key + "_strength"] = FX_STRENGTH_DEFAULT
     progress = _new_profile()
     _read_saved_profile()
 
@@ -499,7 +466,9 @@ func _read_saved_profile() -> void:
     admin_mode = bool(saved.get("admin_mode", false))
     progress.merge(saved.progress, true)
     if saved.get("settings") is Dictionary:
-        settings.merge(saved.settings, true)
+        for key in settings:
+            if saved.settings.get(key) is bool:
+                settings[key] = saved.settings[key]
 
 func _create_obstacles() -> void:
     obstacles.clear()
@@ -1504,8 +1473,7 @@ func _burst(at: Vector2, tint: Color, n: int=8) -> void:
     if dedicated_server:
         return
     # Bounded cosmetic effects: avoid large allocation spikes in crowded waves.
-    var budget := 480 if settings.get("graphics") == "Cinematic" else 320
-    var available := maxi(0, budget - particles.size())
+    var available := maxi(0, 192 - particles.size())
     for i in range(mini(n,available)):
         var angle := rng.randf_range(0,TAU)
         var vel := Vector2.from_angle(angle)*rng.randf_range(40,130)
@@ -1535,6 +1503,12 @@ func _shot(origin_id: int) -> void:
     var pellet_count: int = maxi(1, int(p.pellets)+int(p.double))
     var spread_amount: float = float(p.spread)
     var pierce_count: int = maxi(0, int(p.pierce))
+    var contact_points := PackedVector2Array()
+    var reuse_contacts := pellet_count > 1 or pierce_count > 0
+    if reuse_contacts:
+        contact_points.resize(enemies.size())
+        for index in range(enemies.size()):
+            contact_points[index] = _project_world(enemies[index].pos, camera_pos) + Vector2(0, -22)
     for i in range(pellet_count):
         var angle: float = aim.angle()
         if pellet_count > 1:
@@ -1548,11 +1522,12 @@ func _shot(origin_id: int) -> void:
         while remaining > 0.0:
             var best: Dictionary = {}
             var best_distance: float = remaining
-            for e in enemies:
+            for index in range(enemies.size()):
+                var e: Dictionary = enemies[index]
                 if float(e.hp) <= 0.0 or hit_ids.has(e.id):
                     continue
-                var point: Vector2 = _project_world(e.pos, camera_pos) + Vector2(0, -22)
-                var difference: Vector2 = point - ray_origin
+                var point := contact_points[index] if reuse_contacts else _project_world(e.pos, camera_pos) + Vector2(0, -22)
+                var difference := point - ray_origin
                 var along: float = difference.dot(direction)
                 if along <= 0.0 or along >= best_distance:
                     continue
@@ -2089,13 +2064,13 @@ func _shoot_enemy(e: Dictionary, dir: Vector2, kind: String, speed_override: flo
 func _update_enemy_blobs(dt:float)->void:
     # Host-side movement/collision; every local and remote player gets the same
     # dodge window. Swept collision prevents projectiles skipping players at high FPS.
-    for blob in enemy_blobs.duplicate():
+    var kept := 0
+    for blob in enemy_blobs:
         var start: Vector2 = blob.pos
         var movement: Vector2 = blob.velocity * dt
         var destination: Vector2 = _wrap_vec(start + _uniso(movement))
         blob.age += dt
         if blob.age >= blob.life:
-            enemy_blobs.erase(blob)
             continue
         # Check blocking terrain at a bounded rate to avoid unnecessary per-frame
         # spatial-hash allocations when many squirrels shoot together.
@@ -2104,27 +2079,30 @@ func _update_enemy_blobs(dt:float)->void:
             blob.terrain_clock = 0.07
             if not blob.pattern_shot and not _can_occupy(destination, 0.18):
                 _burst(_project_world(destination,camera_pos), Color("a6e879") if blob.kind != "ice" else Color("97e9ff"), 3)
-                enemy_blobs.erase(blob)
                 continue
         var struck: bool = false
-        var span_sq: float = movement.length_squared()
+        var span_sq := movement.length_squared()
+        var combined_radius := (11.0 if blob.pattern_shot else 17.0) + float(blob.radius)
+        var max_offset := movement.abs() + Vector2.ONE * combined_radius
         for id in players:
             var player: Dictionary = players[id]
             if player.hp <= 0.0:
                 continue
-            var relative: Vector2 = _screen_delta(player.pos,start)
+            var relative := _screen_delta(player.pos, start)
+            if absf(relative.x) > max_offset.x or absf(relative.y) > max_offset.y:
+                continue
             var alpha: float = clampf(relative.dot(movement)/span_sq,0.0,1.0) if span_sq > 0.0001 else 0.0
             var nearest: Vector2 = movement * alpha
-            var combined_radius: float = (11.0 if blob.pattern_shot else 17.0) + float(blob.radius)
             if relative.distance_squared_to(nearest) <= combined_radius * combined_radius:
                 _damage_player(id,float(blob.damage))
                 _burst(_project_world(player.pos,camera_pos) + Vector2(0,-23), Color("b2f36c") if blob.kind != "ice" else Color("87dfff"), 5)
                 struck = true
                 break
-        if struck:
-            enemy_blobs.erase(blob)
-        else:
+        if not struck:
             blob.pos = destination
+            enemy_blobs[kept] = blob
+            kept += 1
+    enemy_blobs.resize(kept)
 
 func _create_hazard(pos:Vector2,kind:String,radius:float,lifetime:float)->void:
     hazards.append({"pos":pos,"kind":kind,"radius":radius,"age":0.0,"life":lifetime,"tick":.5})
@@ -2135,8 +2113,10 @@ func _nearest_alive_player(pos:Vector2)->int:
     for id in players:
         var p:Dictionary=players[id]
         if p.hp<=0:continue
-        var d:=_screen_distance(pos,p.pos)
-        if d<best:best=d;closest=id
+        var d := _screen_delta(pos, p.pos).length_squared()
+        if d < best:
+            best = d
+            closest = id
     return closest
 
 func _update_drops_and_hazards(dt:float)->void:
@@ -2276,16 +2256,6 @@ func _process(dt:float)->void:
         if save_seconds >= 2.8:
             _flush_progress()
     elapsed+=dt
-    if fx_rect != null and fx_rect.visible:
-        fx_time += dt
-        fx_material.set_shader_parameter("u_time", fx_time)
-        fx_material.set_shader_parameter("u_day", day_phase)
-        var grove_shift := Vector2(sin(camera_pos.x * TAU / MAP), cos(camera_pos.y * TAU / MAP))
-        fx_material.set_shader_parameter("u_canopy", grove_shift)
-        fx_material.set_shader_parameter("u_weather", 1.0 if weather in ["rain","mist","snow"] and bool(settings.get("weather",true)) else 0.0)
-        var motion_vec: Vector2 = _screen_delta(camera_pos, last_camera_pos)
-        fx_material.set_shader_parameter("u_motion", motion_vec / 64.0)
-    last_camera_pos = camera_pos
     for impact in warning_impacts.duplicate():
         impact.life -= dt
         if impact.life <= 0.0:
@@ -2935,106 +2905,8 @@ func _panel_style(bg: String="#10292c", border: String="#c5a66f", radius:int=18)
     s.content_margin_bottom=12
     return s
 
-# -------- GPU post effects: a single native shader pass, OFF when no effects active --------
-func _make_gpu_fx() -> void:
-    fx_layer = CanvasLayer.new()
-    fx_layer.layer = 3
-    add_child(fx_layer)
-    fx_rect = ColorRect.new()
-    fx_rect.name = "GPU Post Processing (optional)"
-    fx_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    fx_rect.color = Color.WHITE
-    fx_material = ShaderMaterial.new()
-    fx_material.shader = load("res://shaders/native_post.gdshader")
-    fx_rect.material = fx_material
-    fx_layer.add_child(fx_rect)
-    fx_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    _apply_graphics_settings()
-
-func _fx_amount(key: String) -> float:
-    if not bool(settings.get(key, false)):
-        return 0.0
-    return float(settings.get(key + "_strength", FX_STRENGTH_DEFAULT))
-
-func _apply_graphics_settings() -> void:
-    if fx_rect == null or fx_material == null:
-        return
-    # Old saved settings and Cinematic must not reintroduce sprite smearing.
-    settings["fx_dof"] = false
-    settings["fx_motion_blur"] = false
-    settings["fx_aa"] = "Off"
-    var shader_needed: bool = false
-    for effect in GRAPHICS_EFFECTS:
-        var key: String = str(effect.id)
-        if key in ["fx_contact_shadows", "fx_reflections", "fx_long_exposure"]:
-            continue
-        var amount: float = _fx_amount(key)
-        fx_material.set_shader_parameter(key, amount)
-        if amount > 0.001:
-            shader_needed = true
-    var aa_weight: float = 0.0
-    # Antialias blending is intentionally disabled for crisp nearest-neighbor pixels.
-    fx_material.set_shader_parameter("fx_aa", aa_weight)
-    shader_needed = shader_needed or aa_weight > 0.0
-    fx_rect.visible = shader_needed and page == "playing"
-    if world != null:
-        world.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-        world.queue_redraw()
-
-func _set_fx_bool(key: String, value: bool) -> void:
-    settings[key] = value
-    _apply_graphics_settings()
-    _save_progress()
-
-func _set_fx_strength(key: String, value: float) -> void:
-    settings[key + "_strength"] = value
-    _apply_graphics_settings()
-    _save_progress()
-
-func _choose_antialias(index: int) -> void:
-    var modes: PackedStringArray = PackedStringArray(["Off", "FXAA-like", "SMAA-like", "TAA-like"])
-    if index >= 0 and index < modes.size():
-        settings["fx_aa"] = "Off"
-        _apply_graphics_settings()
-        _save_progress()
-
-func _apply_graphics_preset(preset: String) -> void:
-    # Keep high-cost effects disabled in the default settings.
-    for effect in GRAPHICS_EFFECTS:
-        var key: String = str(effect.id)
-        settings[key] = false
-        settings[key + "_strength"] = FX_STRENGTH_DEFAULT
-    settings["fx_aniso"] = false
-    settings["fx_aa"] = "Off"
-    if preset == "Balanced":
-        settings["fx_contact_shadows"] = true
-        settings["fx_color_grade"] = true
-        settings["fx_vignette"] = true
-        settings["fx_color_grade_strength"] = 0.20
-        settings["fx_vignette_strength"] = 0.14
-    elif preset == "Cinematic":
-        for key in ["fx_contact_shadows", "fx_color_grade", "fx_vignette", "fx_fog", "fx_god_rays", "fx_bloom", "fx_reflections", "fx_long_exposure"]:
-            settings[key] = true
-        settings["fx_aa"] = "Off"
-        settings["fx_aniso"] = false
-        settings["fx_bloom_strength"] = 0.25
-        settings["fx_chromatic_strength"] = 0.09
-    elif preset == "Performance":
-        settings["fx_contact_shadows"] = true
-    else:
-        settings["fx_contact_shadows"] = true
-    settings["graphics"] = preset
-    _apply_graphics_settings()
-    _save_progress()
-    _show_page("settings")
-
 func _open_settings(from_page: String) -> void:
     settings_return_page = from_page
-    graphics_tab = "general"
-    _show_page("settings")
-
-func _change_settings_tab(which: String) -> void:
-    graphics_tab = which
     _show_page("settings")
 
 func _make_pixel_hud_stat(container: HBoxContainer, icon_file: String, tooltip: String, tint: Color) -> Label:
@@ -3554,7 +3426,6 @@ func _show_page(new_page:String)->void:
     if page != new_page:
         main_scroll.set_deferred("scroll_vertical", 0)
     page=new_page
-    _apply_graphics_settings()
     if world != null:
         world.queue_redraw()
     _clear_menu()
@@ -3911,37 +3782,6 @@ func _upgrades_reference_menu()->void:
     for k in LEGENDARY_UPGRADES:_ency_upgrade_row(k,LEGENDARY_UPGRADES[k])
     _menu_button("BACK",func():_show_page("title"),"muted")
 
-func _fx_row(key: String, label_text: String, description: String, cost: String) -> void:
-    var row: PanelContainer = PanelContainer.new()
-    row.add_theme_stylebox_override("panel", _panel_style("#162d30", "#3e6965", 11))
-    main_layout.add_child(row)
-    var line: HBoxContainer = HBoxContainer.new()
-    line.add_theme_constant_override("separation", 9)
-    row.add_child(line)
-    var info: VBoxContainer = VBoxContainer.new()
-    info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    info.custom_minimum_size.x = 440
-    line.add_child(info)
-    info.add_child(_make_label(label_text + "   [" + cost + "]", 16, "#f4dab0"))
-    info.add_child(_make_label(description, 12, "#b5d0c9"))
-    var toggle: CheckButton = CheckButton.new()
-    toggle.text = "ON" if bool(settings.get(key, false)) else "OFF"
-    toggle.button_pressed = bool(settings.get(key, false))
-    toggle.custom_minimum_size.x = 72
-    toggle.toggled.connect(func(enabled: bool) -> void:
-        _set_fx_bool(key, enabled)
-        toggle.text = "ON" if enabled else "OFF"
-    )
-    line.add_child(toggle)
-    var slider: HSlider = HSlider.new()
-    slider.custom_minimum_size = Vector2(150, 28)
-    slider.min_value = 0.05
-    slider.max_value = 1.0
-    slider.step = 0.05
-    slider.value = float(settings.get(key + "_strength", FX_STRENGTH_DEFAULT))
-    slider.value_changed.connect(func(new_value: float) -> void: _set_fx_strength(key, new_value))
-    line.add_child(slider)
-
 func _set_general_option(enabled: bool, key: String) -> void:
     settings[key] = enabled
     if key == "music" and not enabled:
@@ -3949,62 +3789,21 @@ func _set_general_option(enabled: bool, key: String) -> void:
         boss_music.stop()
     _save_progress()
 
-func _settings_menu()->void:
+func _settings_menu() -> void:
     _heading("SETTINGS")
-    var tab_row: HBoxContainer = HBoxContainer.new()
-    tab_row.add_theme_constant_override("separation", 12)
-    main_layout.add_child(tab_row)
-    for tab_id in ["general", "graphics"]:
-        var tab: Button = Button.new()
-        tab.text = tab_id.to_upper()
-        tab.custom_minimum_size = Vector2(0, 42)
-        tab.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-        tab.add_theme_stylebox_override("normal", _panel_style("#38594c" if graphics_tab == tab_id else "#1b3439", "#d4b67e" if graphics_tab == tab_id else "#497476", 12))
-        tab.add_theme_stylebox_override("hover", _panel_style("#527968", "#d4b67e", 12))
-        tab.pressed.connect(Callable(self,"_change_settings_tab").bind(tab_id))
-        tab_row.add_child(tab)
-    if graphics_tab == "general":
-        _section("GENERAL / ACCESSIBILITY")
-        for item in [
-            ["fps", "FPS COUNTER", "Display your current native frame rate."],
-            ["weather", "DAY & WEATHER EFFECTS", "Rain, snow, fog and the host-synchronized cycle."],
-            ["music", "SOUND / MUSIC", "Audio and original boss music."],
-            ["novelty", "FAKE STINKY MERCH ADS", "Entirely fictional novelty pop-ups, off by default."]
-        ]:
-            var setting_key: String = str(item[0])
-            var toggle: CheckButton = CheckButton.new()
-            toggle.text = str(item[1]) + "    —    " + str(item[2])
-            toggle.button_pressed = bool(settings.get(setting_key, false))
-            toggle.custom_minimum_size.y = 46
-            toggle.toggled.connect(Callable(self,"_set_general_option").bind(setting_key))
-            main_layout.add_child(toggle)
-        _section("PERFORMANCE")
-        main_layout.add_child(_make_label("Frame cap: 120 FPS on desktop and 60 FPS on touch browsers. Use the Performance preset to reduce effects.", 14, "#c8e0c9"))
-    else:
-        main_layout.add_child(_make_label("NATIVE GPU SHADERS  ·  Customize effects individually. Most are off by default to protect FPS.", 14, "#a7dfca", true))
-        var presets: HBoxContainer = HBoxContainer.new()
-        presets.add_theme_constant_override("separation", 8)
-        main_layout.add_child(presets)
-        for preset_name in ["Original Pixels", "Performance", "Balanced", "Cinematic"]:
-            var preset_button: Button = Button.new()
-            preset_button.text = preset_name
-            preset_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-            preset_button.custom_minimum_size.y = 37
-            preset_button.add_theme_stylebox_override("normal", _panel_style("#2b4946", "#668d82", 11))
-            preset_button.pressed.connect(Callable(self,"_apply_graphics_preset").bind(preset_name))
-            presets.add_child(preset_button)
-        _section("IMAGE CLARITY")
-        main_layout.add_child(_make_label("CRISP PIXELS  ·  No blur, anti-alias smoothing or anisotropic filtering at any quality setting. Original nearest-neighbor sprites stay sharp.",14,"#b6f5d6",true))
-        var category: String = ""
-        for effect in GRAPHICS_EFFECTS:
-            var group: String = str(effect.group)
-            if category != group:
-                category = group
-                _section(category)
-            _fx_row(str(effect.id), str(effect.name), str(effect.desc), str(effect.cost))
-        _spacer(8)
-        main_layout.add_child(_make_label("NOTE: True depth-buffer SSR, SSAO, 3D volumetric fog, and temporal TAA require a future 2.5D geometry stage. Current Godot features are native shader/sprite techniques—not physically accurate 3D depth effects.", 13, "#fac98c"))
-    _menu_button("BACK",func():_show_page(settings_return_page),"muted")
+    for item in [
+        ["fps", "FPS COUNTER"],
+        ["music", "SOUND / MUSIC"],
+        ["novelty", "FAKE STINKY MERCH ADS"]
+    ]:
+        var key: String = item[0]
+        var toggle := CheckButton.new()
+        toggle.text = item[1]
+        toggle.button_pressed = settings[key]
+        toggle.custom_minimum_size.y = 46
+        toggle.toggled.connect(Callable(self, "_set_general_option").bind(key))
+        main_layout.add_child(toggle)
+    _menu_button("BACK", func(): _show_page(settings_return_page), "muted")
 
 # -------- Local developer console (password gate; not a network privilege) --------
 func _open_admin(from_page: String) -> void:
