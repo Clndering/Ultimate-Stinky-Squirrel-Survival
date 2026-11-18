@@ -40,7 +40,7 @@ At the title screen, open **Progress Tools → Export Save JSON** to back up loc
 
 ## Play together
 
-Use the separate WoodlandWatch_Server package and its START HERE guide for play.stinkysquirrel.online. The package runs on Windows 11 without opening the Godot editor.
+Use the separate WoodlandWatch_Server package and its START HERE guide for stinkysquirrel.online. The package runs on Windows 11 without opening the Godot editor.
 
 - **Over the internet:** Open **Start Online Host.cmd**, then **Share Online Playtest.cmd** to generate a temporary link. Players choose **Fern Creek** or **Lantern Hollow**. Each public room has its own campaign and space for six rangers. See the [Windows hosting guide](HOSTING.md).
 - **On the same network:** Use native desktop builds. Choose an operation and select **Host LAN Co-op**. Other players choose **Join by Address** on the Windows title screen, then enter the host's local IP. The native LAN uses UDP port 27844.

@@ -18,7 +18,7 @@ const SNAPSHOT_INTERVAL := 1.0 / 15.0
 const SNAPSHOT_MAX_BYTES := 262144
 const SNAPSHOT_BACKLOG_BYTES := 32768
 const RangerProgress := preload("res://scripts/RangerProgress.gd")
-const PUBLIC_GAME_HOST := "play.stinkysquirrel.online"
+const PUBLIC_GAME_HOST := "stinkysquirrel.online"
 const CHEST_REACH := 67.0
 const DASH_DURATION := .24
 const DASH_DISTANCE := 225.0
@@ -2824,7 +2824,7 @@ func _start_join()->void:
 func _join_at(addr: String) -> void:
     addr = addr.strip_edges()
     var host_part := addr.get_slice("/", 0).to_lower()
-    if host_part in [PUBLIC_GAME_HOST, "stinkysquirrel.online"]:
+    if host_part in [PUBLIC_GAME_HOST, "play.stinkysquirrel.online"]:
         addr = "https://" + addr
     if addr.begins_with("https://") or addr.begins_with("http://"):
         var scheme := "https://" if addr.begins_with("https://") else "http://"
