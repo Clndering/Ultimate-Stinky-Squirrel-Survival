@@ -1,0 +1,2 @@
+# Preserve the archived HTML byte-for-byte for the source audit.
+reference/*.html -text

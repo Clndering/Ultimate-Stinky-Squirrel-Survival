@@ -1,4 +1,16 @@
-# Stinky Squirrel: Nightwatch
+# Stinky Squirrel
+
+## Woodland Watch
+
+Woodland Watch is the eight-operation cooperative campaign for up to six players. The Windows app, iPhone, Android, and desktop browsers can join the same public rooms. Windows also supports LAN play.
+
+- [Download or browse the complete Godot 4.7.2 source project](StinkySquirrel_WoodlandWatch/)
+- [Open the game website](https://play.stinkysquirrel.online/)
+- [Host your own rooms on Windows](StinkySquirrel_WoodlandWatch/HOSTING.md)
+- [Sharing and reuse terms](StinkySquirrel_WoodlandWatch/LICENSE.md)
+
+## Nightwatch archives
+
 
 A pixel-art wave-survival game about defending an endless forest. This repository contains the standalone browser edition and the editable Godot projects for desktop and mobile web.
 
