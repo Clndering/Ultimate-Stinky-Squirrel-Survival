@@ -627,6 +627,8 @@ func draw_player(player: Dictionary, p: Vector2, is_local: bool) -> void:
     var alpha := 0.48 if player.hp <= 0 else 1.0
     var charskin: String = player.get("character","scout")
     var aim: Vector2 = player.get("aim",Vector2.RIGHT)
+    if is_local and game.mode == "guest" and player.hp > 0.0:
+        aim = game._get_local_aim()
     var sprite := "hero"
     var tint: Color = RangerProgress.OUTFITS.get(charskin, {}).get("tint", Color.WHITE)
     if charskin != "scout" and art.has("outfit_" + charskin):

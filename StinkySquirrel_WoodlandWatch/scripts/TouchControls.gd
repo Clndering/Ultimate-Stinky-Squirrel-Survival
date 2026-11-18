@@ -3,6 +3,7 @@ extends Control
 signal dash_pressed
 signal chest_pressed
 signal menu_pressed
+signal interrupted
 
 const STICK_RADIUS := 80.0
 const STICK_REACH := 112.0
@@ -18,6 +19,12 @@ var active := false
 var gameplay_active := false
 var browser_canvas: JavaScriptObject
 var browser_window: JavaScriptObject
+var browser_document: JavaScriptObject
+var browser_rotate_hint: JavaScriptObject
+var browser_layout_callback: JavaScriptObject
+var browser_visibility_callback: JavaScriptObject
+var browser_uses_pointers := false
+var browser_portrait := false
 var browser_touch_callback: JavaScriptObject
 var browser_blur_callback: JavaScriptObject
 var browser_events: Array[String] = []
@@ -73,6 +80,12 @@ func _exit_tree() -> void:
         for event in browser_events:
             browser_window.removeEventListener(event, browser_touch_callback, browser_touch_options)
         browser_window.removeEventListener("blur", browser_blur_callback)
+        browser_window.removeEventListener("pagehide", browser_blur_callback)
+        browser_window.removeEventListener("resize", browser_layout_callback)
+    if browser_document != null:
+        browser_document.removeEventListener("visibilitychange", browser_visibility_callback)
+    if browser_rotate_hint != null:
+        browser_rotate_hint.remove()
     if mobile_layout:
         Input.emulate_mouse_from_touch = original_mouse_emulation
 
@@ -116,16 +129,22 @@ func wants_reload() -> bool:
 func _bind_browser_touch() -> void:
     if not OS.has_feature("web"):
         return
-    var document := JavaScriptBridge.get_interface("document")
+    browser_document = JavaScriptBridge.get_interface("document")
     browser_window = JavaScriptBridge.get_interface("window")
-    if document == null or browser_window == null:
+    if browser_document == null or browser_window == null:
         return
-    browser_canvas = document.getElementById("canvas")
+    browser_canvas = browser_document.getElementById("canvas")
     if browser_canvas == null:
         return
     browser_canvas.style.touchAction = "none"
-    var supports_pointer := bool(JavaScriptBridge.eval("typeof PointerEvent === 'function'"))
-    if supports_pointer:
+    # Safari may cancel pointer capture for browser gestures while Touch Events
+    # continue to track each finger. This also covers iPads using desktop mode.
+    var nav := JavaScriptBridge.get_interface("navigator")
+    var apple_touch := OS.has_feature("web_ios") or (nav != null and
+        (str(nav.userAgent).contains("iPhone") or str(nav.userAgent).contains("iPad")
+        or (str(nav.platform) == "MacIntel" and int(nav.maxTouchPoints) > 1)))
+    browser_uses_pointers = not apple_touch and bool(JavaScriptBridge.eval("typeof PointerEvent === 'function'"))
+    if browser_uses_pointers:
         browser_events.assign(["pointerdown", "pointermove", "pointerup", "pointercancel", "lostpointercapture"])
         browser_touch_callback = JavaScriptBridge.create_callback(_on_browser_pointer)
     else:
@@ -133,6 +152,12 @@ func _bind_browser_touch() -> void:
         browser_touch_callback = JavaScriptBridge.create_callback(_on_browser_touch)
     browser_blur_callback = JavaScriptBridge.create_callback(_on_browser_blur)
     browser_window.addEventListener("blur", browser_blur_callback)
+    browser_window.addEventListener("pagehide", browser_blur_callback)
+    browser_visibility_callback = JavaScriptBridge.create_callback(_on_browser_visibility)
+    browser_document.addEventListener("visibilitychange", browser_visibility_callback)
+    browser_layout_callback = JavaScriptBridge.create_callback(_on_browser_resize)
+    browser_window.addEventListener("resize", browser_layout_callback)
+    _update_browser_layout()
     browser_touch_options = JavaScriptBridge.create_object("Object")
     browser_touch_options.passive = false
     browser_touch_options.capture = true
@@ -147,7 +172,40 @@ static func browser_to_game(client: Vector2, canvas_rect: Rect2, game_size: Vect
     return (client - canvas_rect.position - padding) / scale_value
 
 func _on_browser_blur(_args: Array) -> void:
+    _interrupt_input()
+
+func _interrupt_input() -> void:
+    var had_touch := move_finger >= 0 or aim_finger >= 0 or not action_fingers.is_empty() or reload_until > Time.get_ticks_msec()
     clear_input()
+    if active and had_touch:
+        interrupted.emit()
+
+func _on_browser_visibility(_args: Array) -> void:
+    if bool(browser_document.hidden):
+        _interrupt_input()
+
+func _on_browser_resize(_args: Array) -> void:
+    _update_browser_layout()
+
+func _update_browser_layout() -> void:
+    var portrait := int(browser_window.innerHeight) > int(browser_window.innerWidth)
+    if portrait != browser_portrait:
+        browser_portrait = portrait
+        _interrupt_input()
+    if not mobile_layout:
+        return
+    if browser_rotate_hint == null:
+        browser_rotate_hint = browser_document.createElement("p")
+        browser_rotate_hint.id = "woodland-rotate-hint"
+        browser_rotate_hint.textContent = "Rotate your device for larger controls."
+        browser_rotate_hint.setAttribute("role", "status")
+        browser_rotate_hint.style.cssText = ("position:fixed;z-index:2;left:0;right:0;"
+            + "top:max(12px,env(safe-area-inset-top));margin:0 auto;padding:10px 14px;width:max-content;"
+            + "max-width:calc(100% - 32px);text-align:center;box-sizing:border-box;"
+            + "font:600 15px system-ui,sans-serif;color:#f3e9d0;background:#10292c;"
+            + "border:1px solid #547970;border-radius:12px;pointer-events:none;")
+        browser_document.body.appendChild(browser_rotate_hint)
+    browser_rotate_hint.hidden = not portrait
 
 func _browser_point(client: Vector2) -> Vector2:
     var rect: JavaScriptObject = browser_canvas.getBoundingClientRect()
@@ -158,6 +216,7 @@ func _begin_browser_touch(event: JavaScriptObject) -> void:
     if not mobile_layout:
         mobile_layout = true
         set_active(true)
+        _update_browser_layout()
     using_touch = true
     event.preventDefault()
     event.stopImmediatePropagation()
@@ -212,7 +271,7 @@ func _input(event: InputEvent) -> void:
     if not active:
         return
     if event is InputEventMouse:
-        if browser_canvas != null or event.device == InputEvent.DEVICE_ID_EMULATION:
+        if browser_uses_pointers or event.device == InputEvent.DEVICE_ID_EMULATION:
             return
         if move_finger < 0 and aim_finger < 0 and action_fingers.is_empty():
             using_touch = false

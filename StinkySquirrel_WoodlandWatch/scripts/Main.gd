@@ -16,6 +16,7 @@ const ProfileTransfer = preload("res://scripts/ProfileTransfer.gd")
 const GuestMotion = preload("res://scripts/GuestMotion.gd")
 const SNAPSHOT_INTERVAL := 1.0 / 15.0
 const SNAPSHOT_MAX_BYTES := 262144
+const SNAPSHOT_BACKLOG_BYTES := 32768
 const RangerProgress := preload("res://scripts/RangerProgress.gd")
 const PUBLIC_GAME_HOST := "play.stinkysquirrel.online"
 const CHEST_REACH := 67.0
@@ -352,34 +353,43 @@ var sfx: Dictionary = {}
 func _ready() -> void:
     rng.randomize()
     upgrade_catalog = _upgrade_catalog()
-    Engine.max_fps = 120
-    RenderingServer.set_default_clear_color(Color("172f38"))
-    set_process_input(true)
-    # Keep OS close/Alt-F4 from bypassing the quit confirmation.
-    get_tree().auto_accept_quit = false
+    var mobile_web := OS.has_feature("web") and MobileTouch.wants_mobile_layout()
+    if mobile_web:
+        settings["graphics"] = "Performance"
     _load_progress()
     _retain_legacy_licenses()
     _normalize_loadout_profile()
     _migrate_unlock_rules()
+    multiplayer.peer_connected.connect(_peer_connected)
+    multiplayer.peer_disconnected.connect(_peer_disconnected)
+    _create_obstacles()
+    if not OS.has_feature("web") and OS.get_cmdline_user_args().has("--serve"):
+        set_process_input(false)
+        _start_dedicated_server()
+        return
+
+    Engine.max_fps = 120
+    if mobile_web:
+        # Render in game pixels instead of resampling the scene at the phone's full DPR.
+        get_tree().root.content_scale_mode = Window.CONTENT_SCALE_MODE_VIEWPORT
+        get_tree().root.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
+        Engine.max_fps = 60
+    RenderingServer.set_default_clear_color(Color("172f38"))
+    set_process_input(true)
+    # Keep OS close/Alt-F4 from bypassing the quit confirmation.
+    get_tree().auto_accept_quit = false
     world = preload("res://scripts/World.gd").new()
     world.game = self
     add_child(world)
     _make_gpu_fx()
     _make_ui()
-    if not OS.get_cmdline_user_args().has("--serve"):
-        _make_touch_controls()
+    _make_touch_controls()
     _make_quit_dialog()
     _make_audio()
-    multiplayer.peer_connected.connect(_peer_connected)
-    multiplayer.peer_disconnected.connect(_peer_disconnected)
     multiplayer.connected_to_server.connect(_joined_server)
     multiplayer.connection_failed.connect(_failed_connection)
     multiplayer.server_disconnected.connect(_server_disconnected)
-    _create_obstacles()
-    _apply_graphics_settings()
     _show_page("title")
-    if OS.get_cmdline_user_args().has("--serve"):
-        _start_dedicated_server()
 
 func _make_audio() -> void:
     music = AudioStreamPlayer.new()
@@ -538,18 +548,32 @@ func _sd(d: float) -> float:
 func _screen_delta(a: Vector2,b: Vector2) -> Vector2:
     return Vector2((_sd(a.x-b.x)-_sd(a.y-b.y))*32.0,(_sd(a.x-b.x)+_sd(a.y-b.y))*16.0)
 
+func _project_world(pos: Vector2, focus: Vector2) -> Vector2:
+    return CENTER + _screen_delta(pos, focus)
+
 func _screen_distance(a: Vector2,b: Vector2) -> float:
     return _screen_delta(a,b).length()
 
 func _uniso(v: Vector2) -> Vector2:
     return Vector2(v.x/64.0+v.y/32.0,v.y/32.0-v.x/64.0)
 
-# Collision remains deterministic on the toroidal map; testing only nine small
-# spatial buckets per step avoids allocating a navigation mesh for every squirrel.
-func _can_occupy(pos: Vector2, collision_radius: float=.48) -> bool:
-    for object in nearby_obstacles(pos, 3):
-        if _screen_distance(pos, object.pos) < (collision_radius + float(object.radius)) * 24.0:
-            return false
+func _can_occupy(pos: Vector2, collision_radius: float = .48) -> bool:
+    # The isometric screen ellipse extends by sqrt(5)/64 world units per pixel
+    # in either axis. A slightly rounded-up bound includes every possible contact.
+    var extent := (collision_radius + .95) * (24.0 * .035)
+    var min_x := floori((pos.x - extent) / 8.0)
+    var max_x := floori((pos.x + extent) / 8.0)
+    var min_y := floori((pos.y - extent) / 8.0)
+    var max_y := floori((pos.y + extent) / 8.0)
+    for x in range(min_x, max_x + 1):
+        for y in range(min_y, max_y + 1):
+            var bucket: Variant = obstacle_cells.get(Vector2i(posmod(x, 24), posmod(y, 24)))
+            if bucket == null:
+                continue
+            for object in bucket:
+                var width := (collision_radius + float(object.radius)) * 24.0
+                if _screen_delta(pos, object.pos).length_squared() < width * width:
+                    return false
     return true
 
 func _move_to(p: Vector2, move: Vector2, radius: float=.48) -> Vector2:
@@ -923,7 +947,7 @@ func _start_run(chapter: int = 0, from_checkpoint: bool = false) -> void:
     toast_message = "%02d  %s" % [wave, _mission().title]
     toast_timer = 3.0
     _show_page("playing")
-    if boss_music.playing:
+    if not dedicated_server and boss_music.playing:
         boss_music.stop()
     if not dedicated_server and settings.get("music", true) and not music.playing:
         music.play()
@@ -1014,7 +1038,7 @@ func _drop_chest_loot(chest: Dictionary, roll: float) -> void:
         for index in range(3 + rarity):
             xp_drops.append({"pos": _chest_spill(origin, index),
                 "value": float(17 + rarity * 13), "age": 0.0, "fly": false})
-    _burst(world.screen_point(origin, camera_pos), Color(RARITY_COLORS[rarity]), 13)
+    _burst(_project_world(origin, camera_pos), Color(RARITY_COLORS[rarity]), 13)
 
 func _chest_spill(origin: Vector2, index: int) -> Vector2:
     var angle := float(index) * 2.399963
@@ -1287,7 +1311,7 @@ func _update_revives(dt: float) -> void:
 
 func _complete_mission() -> void:
     mission_phase = "complete"
-    if boss_music.playing:
+    if not dedicated_server and boss_music.playing:
         boss_music.stop()
     var reward: int = int(_mission().reward_acorns) + (18 if veteran_operation else 0)
     var field_xp := _mission_reward_xp()
@@ -1470,7 +1494,7 @@ func _kill_enemy(e: Dictionary, owner: int=1) -> void:
                 nearby.hp-=11.0*float(shatter_strength)
                 nearby.chill=maxf(float(nearby.chill),0.7)
     if rng.randf()<.38 or BOSS_KINDS.has(e.kind):_create_drop(e.pos)
-    var loc: Vector2 = world.screen_point(e.pos,camera_pos)
+    var loc: Vector2 = _project_world(e.pos,camera_pos)
     _burst(loc,Color("ffc781"),14)
 
 func _burst(at: Vector2, tint: Color, n: int=8) -> void:
@@ -1503,7 +1527,7 @@ func _shot(origin_id: int) -> void:
     # Every pellet starts at this ORIGINAL muzzle point, not at the hit end
     # of the previous pellet. That was the cause of bullets multiplying
     # behind a squirrel when a shotgun blast landed.
-    var muzzle: Vector2 = world.screen_point(p.pos, camera_pos) + Vector2(0, -27)
+    var muzzle: Vector2 = _project_world(p.pos, camera_pos) + Vector2(0, -27)
     if origin_id == local_id:
         _sound("shotgun")
     p.shots_fired+=1
@@ -1527,7 +1551,7 @@ func _shot(origin_id: int) -> void:
             for e in enemies:
                 if float(e.hp) <= 0.0 or hit_ids.has(e.id):
                     continue
-                var point: Vector2 = world.screen_point(e.pos, camera_pos) + Vector2(0, -22)
+                var point: Vector2 = _project_world(e.pos, camera_pos) + Vector2(0, -22)
                 var difference: Vector2 = point - ray_origin
                 var along: float = difference.dot(direction)
                 if along <= 0.0 or along >= best_distance:
@@ -1612,7 +1636,7 @@ func _step_dash(ranger: Dictionary, dt: float) -> void:
     ranger.dash_dust -= step
     if ranger.dash_dust <= 0.0:
         ranger.dash_dust = .045
-        _burst(world.screen_point(ranger.pos, camera_pos) + Vector2(0, -4), Color("#a8edda"), 5)
+        _burst(_project_world(ranger.pos, camera_pos) + Vector2(0, -4), Color("#a8edda"), 5)
 
 func _damage_player(id:int,dmg:float) -> void:
     if not players.has(id):return
@@ -1634,7 +1658,7 @@ func _everyone_down()->bool:
 
 func _end_run()->void:
     _flush_progress()
-    if boss_music.playing:
+    if not dedicated_server and boss_music.playing:
         boss_music.stop()
     _show_page("defeated")
 
@@ -1676,7 +1700,7 @@ func _update_ultimates(dt:float)->void:
         var trigger:bool=p.ultimate_timer>2.2
         if trigger:
             p.ultimate_timer=0
-            var center:Vector2=world.screen_point(p.pos,camera_pos)
+            var center:Vector2=_project_world(p.pos,camera_pos)
             if p.nova>0:_burst(center,Color("fba56d"),18)
             if p.zero>0:_burst(center,Color("8ae9ff"),15)
             for e in enemies:
@@ -2015,7 +2039,7 @@ func _update_warnings(dt: float) -> void:
         for id in players:
             if _warning_hits(zone, players[id].pos):
                 _damage_player(id, float(zone.damage))
-        _burst(world.screen_point(impact, camera_pos), Color("#ffc16f"), 23)
+        _burst(_project_world(impact, camera_pos), Color("#ffc16f"), 23)
         zone.life = .25
         if warning_impacts.size() < 28:
             warning_impacts.append(zone)
@@ -2079,7 +2103,7 @@ func _update_enemy_blobs(dt:float)->void:
         if blob.terrain_clock <= 0.0:
             blob.terrain_clock = 0.07
             if not blob.pattern_shot and not _can_occupy(destination, 0.18):
-                _burst(world.screen_point(destination,camera_pos), Color("a6e879") if blob.kind != "ice" else Color("97e9ff"), 3)
+                _burst(_project_world(destination,camera_pos), Color("a6e879") if blob.kind != "ice" else Color("97e9ff"), 3)
                 enemy_blobs.erase(blob)
                 continue
         var struck: bool = false
@@ -2094,7 +2118,7 @@ func _update_enemy_blobs(dt:float)->void:
             var combined_radius: float = (11.0 if blob.pattern_shot else 17.0) + float(blob.radius)
             if relative.distance_squared_to(nearest) <= combined_radius * combined_radius:
                 _damage_player(id,float(blob.damage))
-                _burst(world.screen_point(player.pos,camera_pos) + Vector2(0,-23), Color("b2f36c") if blob.kind != "ice" else Color("87dfff"), 5)
+                _burst(_project_world(player.pos,camera_pos) + Vector2(0,-23), Color("b2f36c") if blob.kind != "ice" else Color("87dfff"), 5)
                 struck = true
                 break
         if struck:
@@ -2201,6 +2225,11 @@ func _make_touch_controls() -> void:
     touch_controls.dash_pressed.connect(_trigger_local_dash)
     touch_controls.chest_pressed.connect(_trigger_local_chest)
     touch_controls.menu_pressed.connect(_touch_pause)
+    touch_controls.interrupted.connect(_release_guest_controls)
+
+func _release_guest_controls() -> void:
+    if mode == "guest" and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED:
+        rpc_id(HOST_ID, "submit_input", Vector2.ZERO, _get_local_aim(), false, false, false)
 
 func using_touch_layout() -> bool:
     return touch_controls != null and touch_controls.mobile_layout
@@ -2266,13 +2295,7 @@ func _process(dt:float)->void:
         snapshot_timer += dt
         if snapshot_timer >= SNAPSHOT_INTERVAL:
             snapshot_timer = fmod(snapshot_timer, SNAPSHOT_INTERVAL)
-            var packet := var_to_bytes(_build_snapshot())
-            if packet.size() <= SNAPSHOT_MAX_BYTES:
-                var compressed := packet.compress(FileAccess.COMPRESSION_FASTLZ)
-                if not compressed.is_empty() and compressed.size() < packet.size():
-                    rpc("receive_snapshot", compressed, packet.size())
-                else:
-                    rpc("receive_snapshot", packet, 0)
+            _send_snapshot()
             pending_fx.clear()
     elif mode == "guest" and page == "playing":
         _send_guest_input(dt)
@@ -2343,6 +2366,32 @@ func _physics_process(dt: float) -> void:
         weather_timer -= 30.0
         weather_index = (weather_index + 1) % 5
         weather = ["clear", "wind", "rain", "mist", "snow"][weather_index]
+
+func _send_snapshot() -> void:
+    var recipients := multiplayer.get_peers()
+    var web_peer := multiplayer.multiplayer_peer as WebSocketMultiplayerPeer
+    if web_peer != null:
+        recipients.clear()
+        for id in multiplayer.get_peers():
+            var socket := web_peer.get_peer(id)
+            if socket != null and socket.get_current_outbound_buffered_amount() < SNAPSHOT_BACKLOG_BYTES:
+                recipients.append(id)
+    if recipients.is_empty():
+        return
+    var packet := var_to_bytes(_build_snapshot())
+    if packet.size() > SNAPSHOT_MAX_BYTES:
+        return
+    var compressed := packet.compress(FileAccess.COMPRESSION_FASTLZ)
+    var original_size := 0
+    if not compressed.is_empty() and compressed.size() < packet.size():
+        original_size = packet.size()
+        packet = compressed
+    if web_peer == null:
+        rpc("receive_snapshot", packet, original_size)
+    else:
+        # Superseding snapshots can wait until a slow socket has drained.
+        for id in recipients:
+            rpc_id(id, "receive_snapshot", packet, original_size)
 
 func _build_snapshot() -> Dictionary:
     return {"stamp":Time.get_ticks_msec() * .001,"players":NetState.pack_players(players),"enemies":NetState.pack_enemies(enemies),"drops":drops,"xp_drops":xp_drops,"run_id":run_id,"run_level":run_level,"run_xp":run_xp,"xp_to_next":xp_to_next,"hazards":hazards,"pattern_shots":NetState.pack_bullets(enemy_blobs),"traces":traces.slice(-24),"fx":pending_fx,"wave":wave,"to_spawn":to_spawn,"elapsed":elapsed,"stage_kills":stage_kills,"day":day_phase,"weather":weather,"boss_name":boss_name,"phase":page,"mission_phase":mission_phase,"field":[encounter_wave, wave_break, objective_pos, objective_goal, salvage_collected, salvage_needed, marked_remaining, veteran_operation, flag_carrier, flag_pos, flag_delivered, quota_goal, wave_kills, capture_blocked],"cores":field_salvage,"chests":field_chests,"upgrade_drops":field_upgrade_drops,"warnings":warning_zones,"impacts":warning_impacts,"guard_remaining":guard_remaining,"mission_checkpoint":mission_checkpoint,"dedicated_server":dedicated_server,"run_acorns":squad_mission_acorns,"upgrades_taken":upgrades_taken}
@@ -2547,7 +2596,9 @@ func submit_input(move:Vector2,aim:Vector2,firing:bool,reload:bool,dash:bool)->v
         return
     var previous: Dictionary = player_inputs.get(id, {})
     var now := Time.get_ticks_msec()
-    if not dash and now - int(previous.get("received_at", -1000)) < 15:
+    var released: bool = move.is_zero_approx() and not firing and not reload and (
+        previous.get("move", Vector2.ZERO) != Vector2.ZERO or previous.get("fire", false) or previous.get("reload", false))
+    if not dash and not released and now - int(previous.get("received_at", -1000)) < 15:
         return
     var minimum := Vector2(-1.0, -1.0)
     var maximum := Vector2(1.0, 1.0)
@@ -2631,7 +2682,7 @@ func _use_snapshot(snapshot: Dictionary) -> void:
         particles.clear()
     for event in snapshot.get("fx", []):
         if event is Array and event.size() == 3:
-            _burst(world.screen_point(event[0], camera_pos), event[1], int(event[2]))
+            _burst(_project_world(event[0], camera_pos), event[1], int(event[2]))
     wave=snapshot.get("wave",0)
     to_spawn=snapshot.get("to_spawn",0)
     stage_kills=snapshot.get("stage_kills",0)
@@ -3495,6 +3546,9 @@ func _clear_menu()->void:
         c.queue_free()
 
 func _show_page(new_page:String)->void:
+    if dedicated_server:
+        page = new_page
+        return
     if new_page != "admin":
         reset_confirmation_deadline = 0
     if page != new_page:
@@ -3925,7 +3979,7 @@ func _settings_menu()->void:
             toggle.toggled.connect(Callable(self,"_set_general_option").bind(setting_key))
             main_layout.add_child(toggle)
         _section("PERFORMANCE")
-        main_layout.add_child(_make_label("Default native frame cap: 120 FPS. Optional GPU effects are inactive unless you enable them. Leave expensive effects disabled to protect your 100 FPS baseline.", 14, "#c8e0c9"))
+        main_layout.add_child(_make_label("Frame cap: 120 FPS on desktop and 60 FPS on touch browsers. Use the Performance preset to reduce effects.", 14, "#c8e0c9"))
     else:
         main_layout.add_child(_make_label("NATIVE GPU SHADERS  ·  Customize effects individually. Most are off by default to protect FPS.", 14, "#a7dfca", true))
         var presets: HBoxContainer = HBoxContainer.new()

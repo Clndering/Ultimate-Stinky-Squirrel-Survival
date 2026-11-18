@@ -45,7 +45,7 @@ Use the separate WoodlandWatch_Server package and its START HERE guide for play.
 - **Over the internet:** Open **Start Online Host.cmd**, then **Share Online Playtest.cmd** to generate a temporary link. Players choose **Fern Creek** or **Lantern Hollow**. Each public room has its own campaign and space for six rangers. See the [Windows hosting guide](HOSTING.md).
 - **On the same network:** Use native desktop builds. Choose an operation and select **Host LAN Co-op**. Other players choose **Join by Address** on the Windows title screen, then enter the host's local IP. The native LAN uses UDP port 27844.
 - **Public rooms:** Choose **Join Fern Creek** or **Join Lantern Hollow** in the Windows app or at the game website. Both use the same rooms when the public server is running.
-- **Browser controls:** Open the same game link on your phone and turn it sideways. Drag the left stick to move, and drag the right stick to aim and fire. Both sticks can be held at the same time. The browser also supports keyboard and mouse.
+- **Browser controls:** Open the same game link on your phone and turn it sideways. Drag the left stick to move, and drag the right stick to aim and fire. Both sticks can be held at the same time. Touch browsers render at game resolution and cap at 60 FPS. The Performance preset is the default for new mobile profiles. The browser also supports keyboard and mouse.
 
 ## Sharing and reuse
 
